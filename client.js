@@ -1,21 +1,12 @@
-import { GoogleGenAI } from "@google/genai";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import "dotenv/config";
 
-// Debug: Check if Gemini API key is loaded
-console.log(
-  "Client: Gemini API Key:",
-  process.env.GEMINI_API_KEY ? "✓ Present" : "✗ Missing"
-);
-
 const geminiSampler = async (request) => {
   const API_KEY = process.env.GEMINI_API_KEY;
-  if (!API_KEY) {
-    throw new Error("GEMINI_API_KEY not found in .env file.");
-  }
+  if (!API_KEY) throw new Error("GEMINI_API_KEY not found in .env file.");
 
-  const MODEL_ID = "gemini-1.5-flash";
+  const MODEL_ID = "gemini-2.5-flash-preview-05-20";
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_ID}:generateContent?key=${API_KEY}`;
   const maxRetries = 2;
 
@@ -25,7 +16,7 @@ const geminiSampler = async (request) => {
   }));
 
   const requestBody = {
-    contents: contents,
+    contents,
     generationConfig: {
       temperature: 0.7,
       maxOutputTokens: 4096,
@@ -35,44 +26,38 @@ const geminiSampler = async (request) => {
   };
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    console.log(
-      `Client: Calling Gemini API - Attempt ${attempt + 1}/${maxRetries + 1}`
-    );
     try {
-      const response = await fetch(endpoint, {
+      console.log(`Client: Calling Gemini API (try ${attempt + 1})`);
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(requestBody),
       });
-
-      if (!response.ok) {
-        const errorBody = await response.text();
-        throw new Error(
-          `API call failed with status ${response.status}: ${errorBody}`
-        );
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`Gemini HTTP ${res.status}: ${body}`);
       }
-
-      const data = await response.json();
-      const responseText = data.candidates[0].content.parts[0].text;
-
-      console.log("Client: Got response from Gemini");
-      return { content: { type: "text", text: responseText } };
-    } catch (error) {
-      console.error(`Client: Attempt ${attempt + 1} failed:`, error.message);
+      const data = await res.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+      console.log("Client: ✓ Gemini responded");
+      return { content: { type: "text", text } };
+    } catch (err) {
+      console.error(
+        `Client: Gemini attempt ${attempt + 1} failed:`,
+        err.message
+      );
       if (attempt === maxRetries) {
         return {
-          content: {
-            type: "text",
-            text: "Error: AI service failed after multiple retries.",
-          },
+          content: { type: "text", text: "Gemini error after retries." },
         };
       }
     }
   }
 };
+// --------------------------------------------------
 
 async function main() {
-  console.log("Client: Starting MCP X.com posting client...");
+  console.log("Client: Starting MCP X.com posting client…");
 
   const client = new Client({
     name: "x-posting-client",
@@ -81,59 +66,41 @@ async function main() {
   });
 
   try {
-    console.log("Client: Connecting to server...");
-
-    // Connect to MCP server
     const transport = new SSEClientTransport(
       new URL("http://localhost:3001/sse")
     );
     await client.connect(transport);
     console.log("Client: ✓ Connected to MCP server");
 
-    // Get available tools from server
-    const tools = await client.listTools();
-    console.log("Client: ✓ Fetched available tools from server");
+    await client.listTools();
 
-    // console.log(
-    //   "Client: Available tools:",
-    //   tools.map((t) => t.name).join(", ")
-    // );
-
-    console.log("\n=== STEP 1/3: Caching latest posts from X.com ===");
-    const cacheResult = await client.callTool({
+    const cacheRes = await client.callTool({
       name: "fetchAndCacheTweets",
       arguments: {},
     });
-    console.log("Client: Cache result:", cacheResult.content[0].text);
+    console.log("Client:", cacheRes.content[0].text);
 
-    console.log("\n=== STEP 2/3: Generating a new post ===");
     const topic = "The importance of open standards in AI development";
-    console.log(`Client: Topic: ${topic}`);
-
+    console.log(`\n=== Generating post on: "${topic}" ===`);
     const promptRequest = await client.getPrompt({
       name: "generate-post",
       arguments: { topic },
     });
-    console.log("Client: Got prompt from server, calling Gemini...");
 
-    const generatedResult = await client.createMessage(promptRequest);
-    const newPostContent = generatedResult.content.text;
-    console.log(`Client: Generated content:\n"${newPostContent}"`);
+    const generated = await geminiSampler(promptRequest);
+    const newPostContent = generated.content.text.trim();
+    console.log(`Client: Generated tweet:\n"${newPostContent}"`);
 
-    console.log("\n=== STEP 3/3: Publishing the new post ===");
-    const postResult = await client.callTool({
+    const postRes = await client.callTool({
       name: "postToX",
-      arguments: {
-        content: newPostContent,
-      },
+      arguments: { content: newPostContent },
     });
-    console.log(`Client: Post result: ${postResult.content[0].text}`);
+    console.log("Client:", postRes.content[0].text);
 
     await client.disconnect();
     console.log("\nClient: ✓ Workflow completed successfully!");
-  } catch (error) {
-    console.error("Client: Error during execution:", error.message);
-    console.error("Client: Full error:", error);
+  } catch (err) {
+    console.error("Client: Error:", err.message);
     process.exit(1);
   }
 }

@@ -1,11 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-// import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
-import { z } from "zod";
 import { promises as fs } from "fs";
 import { TwitterApi } from "twitter-api-v2";
 import "dotenv/config";
 import express from "express";
+import cors from "cors";
+import { z } from "zod";
+import { createMCPSchema } from "./createMCPSchema.js"; 
 
 const server = new McpServer({
   name: "x-posting-server",
@@ -14,9 +15,12 @@ const server = new McpServer({
 
 const CACHE_FILE = "cached-tweets.json";
 
-const app = express();
+const app = express(
+  cors({
+    origin: "*",
+  })
+);
 
-// Debug: Check if environment variables are loaded
 console.log("Server: Environment variables check:");
 console.log("- X_API_KEY:", process.env.X_API_KEY ? "✓ Present" : "✗ Missing");
 console.log(
@@ -36,7 +40,6 @@ console.log(
   process.env.X_USERNAME ? "✓ Present" : "✗ Missing"
 );
 
-// Initialize Twitter API client with error handling
 let rwClient;
 try {
   const twitterClient = new TwitterApi({
@@ -55,7 +58,6 @@ try {
   process.exit(1);
 }
 
-// 1. Tool: Fetch and cache tweets
 server.tool(
   "fetchAndCacheTweets",
   {
@@ -67,12 +69,10 @@ server.tool(
     console.log("Server: Tool 'fetchAndCacheTweets' called");
 
     try {
-      // First, try to read existing cache
       try {
         const data = await fs.readFile(CACHE_FILE, "utf-8");
         const cachedTweets = JSON.parse(data);
 
-        // If we have more than 20 cached tweets, return successfully
         if (cachedTweets.length > 0) {
           console.log(
             `Server: Cache has ${cachedTweets.length} tweets (>0), returning successfully without API call`
@@ -96,8 +96,6 @@ server.tool(
         );
       }
 
-      // If we reach here, we need to fetch fresh tweets from Twitter API
-      // Check if username is provided
       if (!process.env.X_USERNAME) {
         throw new Error("X_USERNAME not found in environment variables");
       }
@@ -164,9 +162,9 @@ server.resource(
   "recent-posts",
   "x://user/recent-posts",
   {
-    title: "Recent User Posts", // ✅ Correct title
-    description: "Provides the 20 most recent posts from the local cache.", // ✅ Correct description
-    mimeType: "application/json", // ✅ Resources use mimeType, not inputSchema
+    title: "Recent User Posts",
+    description: "Provides the 20 most recent posts from the local cache.", 
+    mimeType: "application/json", 
   },
   async (uri) => {
     console.log("Server: Resource 'recent-posts' requested");
@@ -184,61 +182,61 @@ server.resource(
 );
 
 // 3. Prompt: Generate a new post
-// 3. Prompt: Generate a new post - CORRECTED VERSION
 server.registerPrompt(
   "generate-post",
   {
     title: "Generate X.com Post",
     description:
       "Generates a new post on a topic, using previous posts for style.",
-    argsSchema: {
-      topic: z.string().describe("Topic for the new post"),
-    },
+    mimeType: "application/json",
+    argsSchema: createMCPSchema({
+      topic: z.string(),
+    }),
   },
   async ({ topic }) => {
     console.log(`Server: Prompt 'generate-post' called with topic: ${topic}`);
     let contextText = "No recent posts available.";
     try {
       const data = await fs.readFile(CACHE_FILE, "utf-8");
-      const tweets = JSON.parse(data).slice(0, 5);
+      const tweets = JSON.parse(data).slice(0, 10);
       contextText = tweets.map((t) => `- "${t.text}"`).join("\n");
       console.log(`Server: Using ${tweets.length} tweets for context`);
     } catch (e) {
       console.log("Server: No cached tweets found for context");
     }
 
-    const systemPrompt = [
+    // ✅ Combine system instructions with user message
+    const userPrompt = [
       "You are an expert social media manager.",
       "Write a short, engaging post for X.com (Twitter) in the user's style.",
+      "",
       "Here are some of the user's recent posts to learn their style:",
       contextText,
+      "",
       `Now write a new post on the topic: "${topic}".`,
       "Keep it under 280 characters and make it engaging.",
-    ].join("\n\n");
+      "",
+      `Topic: ${topic}`,
+    ].join("\n");
 
     return {
-      messages: [
-        { role: "system", content: { type: "text", text: systemPrompt } },
-        { role: "user", content: { type: "text", text: `Topic: ${topic}` } },
-      ],
+      messages: [{ role: "user", content: { type: "text", text: userPrompt } }],
     };
   }
 );
 
 // 4. Tool: Post to X.com
 server.tool(
-  // ✅ Changed from server.resource to server.tool
   "postToX",
   {
     title: "Post to X.com",
     description: "Publishes the given text as a new post on X.com.",
-    inputSchema: z.object({
-      content: z.string().describe("Text to post"),
+    inputSchema: createMCPSchema({
+      content: z.string(),
     }),
   },
   async ({ content }) => {
     console.log("Server: Tool 'postToX' called");
-    console.log(`Server: Content to post: "${content}"`);
     try {
       const { data } = await rwClient.v2.tweet(content);
       console.log(`Server: Successfully posted tweet with ID: ${data.id}`);
